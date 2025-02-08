@@ -22,7 +22,7 @@ const SMALL_WRITES_PER_FILE = 300;
 const SMALL_READ_FILES_DIR = SMALL_FILES_DIR;  // 3번에서 재사용
 
 const LARGE_CSV_DIR = path.join(__dirname, 'test_data', 'step4_large_csv');
-const LARGE_CSV_COUNT = 400; // 1GB 파일 100개
+const LARGE_CSV_COUNT = 250; // 1GB 파일 100개
 const LARGE_CSV_SIZE_BYTES = 1024 * 1024 * 1024; // 1GB
 
 const DB_DIR = path.join(__dirname, 'test_data', 'step6_db');
