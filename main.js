@@ -7,22 +7,20 @@ const fs = require('fs-extra');
 const path = require('path');
 const { spawn } = require('child_process');
 const { performance } = require('perf_hooks');
-
-// DB 사용 예시용 (SQLite)
 const sqlite3 = require('sqlite3').verbose();
 
 // =========================================================
-// 설정값 (필요에 맞게 조정)
+// 설정값
 // =========================================================
 const SMALL_CSV_SINGLE_FILE = path.join(__dirname, 'test_data', 'step1_single.csv');
 const SMALL_FILES_DIR = path.join(__dirname, 'test_data', 'step2_smallfiles');
 const SMALL_FILES_COUNT = 1000;
 const SMALL_WRITES_PER_FILE = 300;
 
-const SMALL_READ_FILES_DIR = SMALL_FILES_DIR;  // 3번에서 재사용
+const SMALL_READ_FILES_DIR = SMALL_FILES_DIR; // 3번에서 재사용
 
 const LARGE_CSV_DIR = path.join(__dirname, 'test_data', 'step4_large_csv');
-const LARGE_CSV_COUNT = 250; // 1GB 파일 100개
+const LARGE_CSV_COUNT = 250; // 1GB 파일 250개
 const LARGE_CSV_SIZE_BYTES = 1024 * 1024 * 1024; // 1GB
 
 const DB_DIR = path.join(__dirname, 'test_data', 'step6_db');
@@ -30,184 +28,105 @@ const DB_FILE = path.join(DB_DIR, 'test.sqlite');
 
 const COMPRESSION_OUTPUT_DIR = path.join(__dirname, 'test_data', 'compressed');
 
-// 9번에서 용량이 찬 상태(= 1~8번 수행 후) 재테스트 시 재사용 (1,2번)
-const STEP9_REPEAT_TIMES = { 
-  // 실제로는 1,2번과 같은 로직을 반복
-  step1Count: 50000,
-  step2FileCount: 1000,
-  step2WritesPerFile: 50
-};
+// Step9/Step10에서 재실행할 때 쓰는 쓰기 횟수(실제로는 Step1,2 횟수와 동일)
+const STEP9_STEP1_COUNT = 50000;       // Step9: Step1 로직 재실행 시 쓰기 횟수
+const STEP10_STEP2_FILECOUNT = 1000;   // Step10: Step2 로직 재실행 시 파일 개수
+const STEP10_STEP2_WRITES = 50;        // Step10: Step2 로직 재실행 시 각 파일당 쓰기 횟수
 
 const results = {}; // 각 단계별 시간 기록
 
-
-
-// 예시: archiver로 ZIP 압축
+// archiver (ZIP 압축)
 const archiver = require('archiver');
 
 /**
- * 주어진 sourceDir(디렉토리)을 ZIP으로 압축하여 outZip 경로에 저장
- */
-async function compressWithZip(sourceDir, outZip) {
-  return new Promise((resolve, reject) => {
-    const output = fs.createWriteStream(outZip);
-    // zlib 압축 레벨(level: 0~9) 조정 가능
-    const archive = archiver('zip', { zlib: { level: 9 } });
-
-    // 스트림 연결
-    archive.pipe(output);
-
-    // 이벤트 핸들러
-    output.on('close', () => {
-      // archive.pointer()로 최종 바이트 수를 알 수 있음
-      console.log(`압축 완료: ${outZip} (${archive.pointer()} bytes)`);
-      resolve();
-    });
-    output.on('end', () => {
-      // console.log('Data has been drained');
-    });
-    archive.on('warning', (err) => {
-      // ENOENT 등 단순 경고는 진행 가능
-      if (err.code === 'ENOENT') {
-        console.warn('압축 과정 경고:', err);
-      } else {
-        reject(err);
-      }
-    });
-    archive.on('error', (err) => {
-      reject(err);
-    });
-
-    // 실제로 디렉토리를 압축에 추가
-    archive.directory(sourceDir, false);
-    // 압축 마무리
-    archive.finalize();
-  });
-}
-
-
-
-
-
-// =========================================================
-// 유틸 함수
-// =========================================================
-
-/**
- * 특정 비동기 함수를 실행하고, 소요 시간을 기록하는 래퍼 함수
+ * 특정 비동기 함수를 실행하고, 소요 시간을 기록
  */
 async function measureAsync(stepName, fn) {
   console.log(`\n===== [${stepName}] 시작 =====`);
   const start = performance.now();
   await fn();
   const end = performance.now();
-  const duration = (end - start) / 1000; // 초 단위
+  const duration = (end - start) / 1000;
   results[stepName] = duration;
   console.log(`===== [${stepName}] 완료: ${duration.toFixed(3)}초 =====`);
 }
 
-/**
- * 특정 크기(바이트)의 임시 데이터를 생성(문자열 or 버퍼)
- * 실제 1GB 메모리에 올리는 건 부담되므로, 보통 스트리밍 방식을 쓰지만
- * 여기서는 단순 샘플이므로 chunk를 반복해서 쓰는 식으로 구현 가능
- */
-function generateData(sizeInBytes) {
-  // 예: 1KB 짜리 문자열 하나를 만들어서 반복 사용
-  const chunk = 'X'.repeat(1024); 
-  const chunkCount = Math.floor(sizeInBytes / 1024);
-  let result = '';
-  for (let i = 0; i < chunkCount; i++) {
-    result += chunk;
-  }
-  // sizeInBytes가 1024로 나누어떨어지지 않을 경우 추가
-  const remainder = sizeInBytes % 1024;
-  if (remainder > 0) {
-    result += 'X'.repeat(remainder);
-  }
-  return result;
-}
-
-/**
- * 7z 압축을 수행하는 함수 (child_process spawn 사용)
- * @param {string} sourcePath 압축할 파일/디렉토리 경로
- * @param {string} outPath 결과 .7z 파일 경로
- */
-async function compressWith7z(sourcePath, outPath) {
-  return new Promise((resolve, reject) => {
-    // 예: 7z a -t7z output.7z source
-    const proc = spawn('7z', ['a', '-t7z', outPath, sourcePath], { stdio: 'inherit' });
-    proc.on('close', (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`7z process exited with code ${code}`));
-      }
-    });
-  });
-}
-
 // =========================================================
-// 단계별 구현
+// Step1, Step2 로직을 공용 함수로 빼기
 // =========================================================
 
-// 1. csv await fs.append (같은 파일에 5만번 append, 5번 평균) - 간단 버전
-async function step1() {
-  const iteration = 3;
-  let totalDuration = 0;
+/**
+ * Step1 로직 (단일 CSV 파일에 appendCount번 쓰기)
+ */
+async function doStep1Logic(appendCount, outFile) {
+  // ────── 추가: 디렉토리 생성 ──────
+  await fs.ensureDir(path.dirname(outFile));
 
-  // 디렉토리 준비
-  await fs.ensureDir(path.dirname(SMALL_CSV_SINGLE_FILE));
-
-  for (let run = 1; run <= iteration; run++) {
-    // 기존 파일 삭제
-    if (await fs.pathExists(SMALL_CSV_SINGLE_FILE)) {
-      await fs.unlink(SMALL_CSV_SINGLE_FILE);
-    }
-
-    // 헤더 추가
-    const header = 'id,value\n';
-    await fs.appendFile(SMALL_CSV_SINGLE_FILE, header);
-
-    const startTime = performance.now();
-    for (let i = 1; i <= 50000; i++) {
-      const row = `${i},value_${i}\n`;
-      await fs.appendFile(SMALL_CSV_SINGLE_FILE, row);
-    }
-    const endTime = performance.now();
-    totalDuration += (endTime - startTime);
+  // 파일이 있으면 삭제
+  if (await fs.pathExists(outFile)) {
+    await fs.unlink(outFile);
   }
+  // 헤더
+  await fs.appendFile(outFile, 'id,value\n');
 
-  const avgMs = totalDuration / iteration;
-  console.log(`Step1 Average Time (3 runs): ${(avgMs / 1000).toFixed(3)}초`);
+  for (let i = 1; i <= appendCount; i++) {
+    const row = `${i},value_${i}\n`;
+    await fs.appendFile(outFile, row);
+  }
 }
 
-// 2. csv await fs.append (서로 다른 파일 1000개에 동시 각각 50번 씩 쓰기)
-async function step2() {
-  await fs.ensureDir(SMALL_FILES_DIR);
+/**
+ * Step2 로직 (fileCount개 작은 파일에, 각각 writesPerFile번 병렬 쓰기)
+ */
+async function doStep2Logic(fileCount, writesPerFile, dirPath) {
+  await fs.ensureDir(dirPath);
 
-  // 파일 1000개 생성 -> 각 파일에 50번씩 append를 병렬로 진행
-  const fileWritePromises = [];
-  for (let i = 0; i < SMALL_FILES_COUNT; i++) {
-    const fileName = `small_${i}.csv`;
-    const filePath = path.join(SMALL_FILES_DIR, fileName);
-
-    // 하나의 파일에 대한 50번 append 작업
-    fileWritePromises.push((async () => {
-      // 파일 초기화 (기존에 있으면 삭제)
+  const tasks = [];
+  for (let i = 0; i < fileCount; i++) {
+    tasks.push((async () => {
+      const fileName = `small_${i}.csv`;
+      const filePath = path.join(dirPath, fileName);
       if (await fs.pathExists(filePath)) {
         await fs.unlink(filePath);
       }
       await fs.appendFile(filePath, 'id,value\n');
-      for (let j = 1; j <= SMALL_WRITES_PER_FILE; j++) {
+      for (let j = 1; j <= writesPerFile; j++) {
         const row = `${j},value_${j}\n`;
         await fs.appendFile(filePath, row);
       }
     })());
   }
 
-  // 모든 파일의 append가 끝날 때까지 대기
-  await Promise.all(fileWritePromises);
+  await Promise.all(tasks);
 }
+
+// =========================================================
+// Step1, Step2 (원본) - measureAsync에서 호출
+// =========================================================
+
+async function step1() {
+  // Step1은 원래 3회 반복 평균
+  const iteration = 3;
+  let totalMs = 0;
+  for (let i = 1; i <= iteration; i++) {
+    const start = performance.now();
+    await doStep1Logic(50000, SMALL_CSV_SINGLE_FILE);  // 원본 Step1: 50,000번
+    const end = performance.now();
+    totalMs += (end - start);
+  }
+  const avgMs = totalMs / iteration;
+  console.log(`Step1 Average Time (3 runs): ${(avgMs / 1000).toFixed(3)}초`);
+}
+
+async function step2() {
+  // Step2: 1000개 파일, 각 300번 writes (현재 설정)
+  await doStep2Logic(SMALL_FILES_COUNT, SMALL_WRITES_PER_FILE, SMALL_FILES_DIR);
+}
+
+// =========================================================
+// Step3 ~ Step8, Step11, Step12는 기존 로직 그대로
+// (여기서는 축약 표기)
+// =========================================================
 
 // 3. 서로 다른 파일 1000개 파일 읽기 (동시에?) - 총 100번 반복
 async function step3() {
@@ -408,7 +327,7 @@ async function step7() {
       .filter((f) => f.endsWith('.sqlite')); // .sqlite 확장자만 필터링
   
     for (let round = 1; round <= 100; round++) {
-      console.log(`[Step7] Round ${round} / 100 시작`);
+      // console.log(`[Step7] Round ${round} / 100 시작`);
   
       for (const dbFile of dbFiles) {
         const dbPath = path.join(DB_DIR, dbFile);
@@ -426,7 +345,7 @@ async function step7() {
         db.close();
       }
   
-      console.log(`[Step7] Round ${round} / 100 완료`);
+      // console.log(`[Step7] Round ${round} / 100 완료`);
     }
   }
   
@@ -475,89 +394,53 @@ async function step8() {
     }
   }
   
-
-// 9. 용량이 어느정도 찬 상태에서 1번수행 (1~8번 수행 후 SSD가 꽤 찼다고 가정)
+// 9. "용량 찬 상태에서 Step1 다시 테스트"
 async function step9() {
-  // step1과 step2를 재실행하는 형태. 단, 쓰기 횟수 등은 임의로 조정해도 됨
-  // 여기서는 STEP9_REPEAT_TIMES를 사용해서 예시
-  console.log('[Step9] SSD가 어느 정도 찬 상태에서 소규모 쓰기 재테스트');
-  
-  // step1 변형 버전
-  {
-    const iteration = 5;
-    let totalDuration = 0;
-    for (let run = 1; run <= iteration; run++) {
-      if (await fs.pathExists(SMALL_CSV_SINGLE_FILE)) {
-        await fs.unlink(SMALL_CSV_SINGLE_FILE);
-      }
-      await fs.appendFile(SMALL_CSV_SINGLE_FILE, 'id,value\n');
+  console.log('[Step9] 용량 찬 상태에서 Step1 로직 재테스트');
 
-      const startTime = performance.now();
-      for (let i = 1; i <= STEP9_REPEAT_TIMES.step1Count; i++) {
-        const row = `${i},value_${i}\n`;
-        await fs.appendFile(SMALL_CSV_SINGLE_FILE, row);
-      }
-      const endTime = performance.now();
-      totalDuration += (endTime - startTime);
-    }
-    const avgMs = totalDuration / iteration;
-    console.log(`[Step9] Average Time: ${(avgMs / 1000).toFixed(3)}초`);
+  // 기존 Step1 파일 삭제
+  if (await fs.pathExists(SMALL_CSV_SINGLE_FILE)) {
+    await fs.unlink(SMALL_CSV_SINGLE_FILE);
   }
 
-  // step2 변형 버전
-  {
-    await fs.ensureDir(SMALL_FILES_DIR);
-    const fileWritePromises = [];
-    for (let i = 0; i < STEP9_REPEAT_TIMES.step2FileCount; i++) {
-      const fileName = `small_retest_${i}.csv`;
-      const filePath = path.join(SMALL_FILES_DIR, fileName);
-
-      fileWritePromises.push((async () => {
-        if (await fs.pathExists(filePath)) {
-          await fs.unlink(filePath);
-        }
-        await fs.appendFile(filePath, 'id,value\n');
-        for (let j = 1; j <= STEP9_REPEAT_TIMES.step2WritesPerFile; j++) {
-          const row = `${j},value_${j}\n`;
-          await fs.appendFile(filePath, row);
-        }
-      })());
-    }
-    await Promise.all(fileWritePromises);
+  // Step1 로직 다시 수행 (appendCount = STEP9_STEP1_COUNT)
+  // 여기서는 Step1과 동일하게 50,000번인지, 별도 count인지 선택 가능
+  // 일단 STEP9_STEP1_COUNT(=50,000)로 동일하게 가정
+  const iteration = 3;
+  let totalMs = 0;
+  for (let i = 1; i <= iteration; i++) {
+    const start = performance.now();
+    await doStep1Logic(STEP9_STEP1_COUNT, SMALL_CSV_SINGLE_FILE);
+    const end = performance.now();
+    totalMs += (end - start);
   }
+  const avgMs = totalMs / iteration;
+  console.log(`[Step9] Step1 재테스트 Average Time: ${(avgMs / 1000).toFixed(3)}초`);
 }
 
-// 10. 용량이 어느정도 찬 상태에서 2번수행 (1~8번 수행 후 SSD가 꽤 찼다고 가정)
+// 10. "용량 찬 상태에서 Step2 다시 테스트"
 async function step10() {
-    // step1과 step2를 재실행하는 형태. 단, 쓰기 횟수 등은 임의로 조정해도 됨
-    // 여기서는 STEP9_REPEAT_TIMES를 사용해서 예시
-    console.log('[Step10] SSD가 어느 정도 찬 상태에서 동시 쓰기 재테스트');
-    
+  console.log('[Step10] 용량 찬 상태에서 Step2 로직 재테스트');
 
-
-    {
-      await fs.ensureDir(SMALL_FILES_DIR);
-      const fileWritePromises = [];
-      for (let i = 0; i < STEP9_REPEAT_TIMES.step2FileCount; i++) {
-        const fileName = `small_retest_${i}.csv`;
-        const filePath = path.join(SMALL_FILES_DIR, fileName);
-  
-        fileWritePromises.push((async () => {
-          if (await fs.pathExists(filePath)) {
-            await fs.unlink(filePath);
-          }
-          await fs.appendFile(filePath, 'id,value\n');
-          for (let j = 1; j <= STEP9_REPEAT_TIMES.step2WritesPerFile; j++) {
-            const row = `${j},value_${j}\n`;
-            await fs.appendFile(filePath, row);
-          }
-        })());
-      }
-      await Promise.all(fileWritePromises);
-    }
+  // 기존 Step2 폴더 삭제
+  if (await fs.pathExists(SMALL_FILES_DIR)) {
+    await fs.remove(SMALL_FILES_DIR);
   }
-  
 
+  // Step2 로직 다시 수행
+  // fileCount, writesPerFile은 Step2 원래대로(1000, 300)로 갈지,
+  // 아니면 STEP9_REPEAT_TIMES(=50, 1000, etc.)로 맞출지 결정
+  // 여기서는 STEP10_STEP2_FILECOUNT=1000, STEP10_STEP2_WRITES=50 사용 예시
+  const start = performance.now();
+  await doStep2Logic(
+    STEP10_STEP2_FILECOUNT, 
+    STEP10_STEP2_WRITES,
+    SMALL_FILES_DIR
+  );
+  const end = performance.now();
+  const durationSec = (end - start) / 1000;
+  console.log(`[Step10] Step2 재테스트 Time: ${durationSec.toFixed(3)}초`);
+}
 
 // 새 함수
 async function compressWithZipMultipleFiles(filePaths, outZip) {
@@ -588,7 +471,47 @@ async function compressWithZipMultipleFiles(filePaths, outZip) {
       archive.finalize();
     });
   }
-  
+
+/**
+ * 주어진 sourceDir(디렉토리)을 ZIP으로 압축하여 outZip 경로에 저장
+ */
+async function compressWithZip(sourceDir, outZip) {
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(outZip);
+    // zlib 압축 레벨(level: 0~9) 조정 가능
+    const archive = archiver('zip', { zlib: { level: 9 } });
+
+    // 스트림 연결
+    archive.pipe(output);
+
+    // 이벤트 핸들러
+    output.on('close', () => {
+      // archive.pointer()로 최종 바이트 수를 알 수 있음
+      console.log(`압축 완료: ${outZip} (${archive.pointer()} bytes)`);
+      resolve();
+    });
+    output.on('end', () => {
+      // console.log('Data has been drained');
+    });
+    archive.on('warning', (err) => {
+      // ENOENT 등 단순 경고는 진행 가능
+      if (err.code === 'ENOENT') {
+        console.warn('압축 과정 경고:', err);
+      } else {
+        reject(err);
+      }
+    });
+    archive.on('error', (err) => {
+      reject(err);
+    });
+
+    // 실제로 디렉토리를 압축에 추가
+    archive.directory(sourceDir, false);
+    // 압축 마무리
+    archive.finalize();
+  });
+}
+
   // 11. 2,4,6에서 만든 파일 각각 압축 (ZIP)
   async function step11() {
     await fs.ensureDir(COMPRESSION_OUTPUT_DIR);
@@ -639,33 +562,21 @@ async function step12() {
 }
 
 // =========================================================
-// 메인 실행 시퀀스
+// 메인 실행
 // =========================================================
 (async () => {
   try {
-    // 1
     await measureAsync('Step1', step1);
-    // 2
     await measureAsync('Step2', step2);
-    // 3
     await measureAsync('Step3', step3);
-    // 4
     await measureAsync('Step4', step4);
-    // 5
     await measureAsync('Step5', step5);
-    // 6
     await measureAsync('Step6', step6);
-    // 7
     await measureAsync('Step7', step7);
-    // 8
     await measureAsync('Step8', step8);
-    // 9
     await measureAsync('Step9', step9);
-    // 10
     await measureAsync('Step10', step10);
-    // 11
     await measureAsync('Step11', step11);
-    // 12
     await measureAsync('Step12', step12);
 
     console.log('\n===== 테스트 완료! 각 단계별 소요 시간(초) =====');
