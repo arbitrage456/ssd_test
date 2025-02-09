@@ -1,11 +1,8 @@
-/**
- * SSD I/O 성능 테스트 스크립트
- * node test-ssd.js
- */
+// npm install fs-extra archiver sqlite3
+
 
 const fs = require('fs-extra');
 const path = require('path');
-const { spawn } = require('child_process');
 const { performance } = require('perf_hooks');
 const sqlite3 = require('sqlite3').verbose();
 
@@ -24,14 +21,9 @@ const LARGE_CSV_COUNT = 250; // 1GB 파일 250개
 const LARGE_CSV_SIZE_BYTES = 1024 * 1024 * 1024; // 1GB
 
 const DB_DIR = path.join(__dirname, 'test_data', 'step6_db');
-const DB_FILE = path.join(DB_DIR, 'test.sqlite');
 
 const COMPRESSION_OUTPUT_DIR = path.join(__dirname, 'test_data', 'compressed');
 
-// Step9/Step10에서 재실행할 때 쓰는 쓰기 횟수(실제로는 Step1,2 횟수와 동일)
-const STEP9_STEP1_COUNT = 50000;       // Step9: Step1 로직 재실행 시 쓰기 횟수
-const STEP10_STEP2_FILECOUNT = 1000;   // Step10: Step2 로직 재실행 시 파일 개수
-const STEP10_STEP2_WRITES = 50;        // Step10: Step2 로직 재실행 시 각 파일당 쓰기 횟수
 
 const results = {}; // 각 단계별 시간 기록
 
@@ -410,7 +402,7 @@ async function step9() {
   let totalMs = 0;
   for (let i = 1; i <= iteration; i++) {
     const start = performance.now();
-    await doStep1Logic(STEP9_STEP1_COUNT, SMALL_CSV_SINGLE_FILE);
+    await doStep1Logic(50000, SMALL_CSV_SINGLE_FILE);
     const end = performance.now();
     totalMs += (end - start);
   }
@@ -433,9 +425,7 @@ async function step10() {
   // 여기서는 STEP10_STEP2_FILECOUNT=1000, STEP10_STEP2_WRITES=50 사용 예시
   const start = performance.now();
   await doStep2Logic(
-    STEP10_STEP2_FILECOUNT, 
-    STEP10_STEP2_WRITES,
-    SMALL_FILES_DIR
+    SMALL_FILES_COUNT, SMALL_WRITES_PER_FILE, SMALL_FILES_DIR
   );
   const end = performance.now();
   const durationSec = (end - start) / 1000;
